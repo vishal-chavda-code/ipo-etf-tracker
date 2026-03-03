@@ -51,6 +51,10 @@ ETF_FORM_TYPES = {
     "8-A12B",   # Registration under Securities Exchange Act
 }
 
+# Initial registration forms — only these seed NEW entity rows
+IPO_INITIAL_FORMS = {"S-1", "F-1"}
+ETF_INITIAL_FORMS = {"N-1A"}
+
 # All monitored forms
 ALL_FORM_TYPES = IPO_FORM_TYPES | ETF_FORM_TYPES
 

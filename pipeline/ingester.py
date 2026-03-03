@@ -2,6 +2,7 @@
 
 import logging
 
+from config import IPO_INITIAL_FORMS, ETF_INITIAL_FORMS
 from sec.parsers import FilingRecord
 from db.operations import (
     find_ipo_by_cik,
@@ -31,6 +32,7 @@ def ingest_filings(records: list[FilingRecord]) -> dict:
         "new_etfs": 0,
         "new_events": 0,
         "skipped_duplicates": 0,
+        "skipped_no_initial_reg": 0,
     }
 
     for record in records:
@@ -39,9 +41,9 @@ def ingest_filings(records: list[FilingRecord]) -> dict:
             summary["skipped_duplicates"] += 1
             continue
 
-        entity_id = _ensure_entity_exists(record)
+        entity_id = _ensure_entity_exists(record, summary)
         if entity_id is None:
-            logger.warning("Could not resolve entity for %s", record)
+            # _ensure_entity_exists already updated the appropriate counter
             continue
 
         # Track if entity was newly created
@@ -68,21 +70,26 @@ def ingest_filings(records: list[FilingRecord]) -> dict:
     return summary
 
 
-def _ensure_entity_exists(record: FilingRecord) -> int | None:
+def _ensure_entity_exists(record: FilingRecord, summary: dict) -> int | None:
     """
-    Ensure an entity (IPO or ETF) exists in the DB. Creates it if not found.
+    Ensure an entity (IPO or ETF) exists in the DB.
 
-    Returns the entity's row ID.
+    If the entity is already tracked, return its ID.
+    If not, only create a new row when the form_type is an initial
+    registration form (S-1/F-1 for IPOs, N-1A for ETFs).  Otherwise
+    return None so the caller skips the filing.
+
+    Returns the entity's row ID, or None.
     """
     if record.entity_type == "IPO":
-        return _ensure_ipo_exists(record)
+        return _ensure_ipo_exists(record, summary)
     elif record.entity_type == "ETF":
-        return _ensure_etf_exists(record)
+        return _ensure_etf_exists(record, summary)
     return None
 
 
-def _ensure_ipo_exists(record: FilingRecord) -> int:
-    """Find or create an IPO entity. Returns the row ID."""
+def _ensure_ipo_exists(record: FilingRecord, summary: dict) -> int | None:
+    """Find or create an IPO entity. Returns the row ID, or None if skipped."""
     # Try to find by CIK first (most reliable)
     existing = find_ipo_by_cik(record.cik) if record.cik else None
 
@@ -92,6 +99,15 @@ def _ensure_ipo_exists(record: FilingRecord) -> int:
 
     if existing:
         return existing["id"]
+
+    # Only create a new entity for initial registration forms
+    if record.form_type not in IPO_INITIAL_FORMS:
+        logger.debug(
+            "Skipping non-initial IPO form %s for %s (CIK=%s)",
+            record.form_type, record.entity_name, record.cik,
+        )
+        summary["skipped_no_initial_reg"] += 1
+        return None
 
     # Create new
     new_id = insert_ipo({
@@ -107,8 +123,8 @@ def _ensure_ipo_exists(record: FilingRecord) -> int:
     return new_id
 
 
-def _ensure_etf_exists(record: FilingRecord) -> int:
-    """Find or create an ETF entity. Returns the row ID."""
+def _ensure_etf_exists(record: FilingRecord, summary: dict) -> int | None:
+    """Find or create an ETF entity. Returns the row ID, or None if skipped."""
     existing = find_etf_by_cik(record.cik) if record.cik else None
 
     if existing is None:
@@ -116,6 +132,15 @@ def _ensure_etf_exists(record: FilingRecord) -> int:
 
     if existing:
         return existing["id"]
+
+    # Only create a new entity for initial registration forms
+    if record.form_type not in ETF_INITIAL_FORMS:
+        logger.debug(
+            "Skipping non-initial ETF form %s for %s (CIK=%s)",
+            record.form_type, record.entity_name, record.cik,
+        )
+        summary["skipped_no_initial_reg"] += 1
+        return None
 
     new_id = insert_etf({
         "fund_name": record.entity_name,
