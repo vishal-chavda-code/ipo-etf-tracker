@@ -2,7 +2,12 @@
 
 import logging
 
-from config import IPO_INITIAL_FORMS, ETF_INITIAL_FORMS
+from config import (
+    IPO_INITIAL_FORMS,
+    ETF_INITIAL_FORMS,
+    ETF_PROSPECTUS_FORMS,
+    LLM_ENRICH_N1A,
+)
 from sec.parsers import FilingRecord
 from db.operations import (
     find_ipo_by_cik,
@@ -11,6 +16,7 @@ from db.operations import (
     find_etf_by_cik,
     find_etf_by_name,
     insert_etf,
+    update_etf,
     event_exists,
     insert_filing_event,
 )
@@ -46,13 +52,6 @@ def ingest_filings(records: list[FilingRecord]) -> dict:
             # _ensure_entity_exists already updated the appropriate counter
             continue
 
-        # Track if entity was newly created
-        if record.entity_type == "IPO":
-            # Check if this was a new insert by seeing if we just created it
-            pass  # counted inside _ensure_entity_exists indirectly
-        elif record.entity_type == "ETF":
-            pass
-
         # Insert filing event
         event_data = {
             "entity_type": record.entity_type,
@@ -65,6 +64,16 @@ def ingest_filings(records: list[FilingRecord]) -> dict:
         }
         insert_filing_event(event_data)
         summary["new_events"] += 1
+
+        # Re-run LLM enrichment on every prospectus-bearing ETF filing so that
+        # amendments (N-1A/A, 485BPOS, 497, …) refresh fields like expense_ratio
+        # and portfolio_manager when the underlying prospectus changes.
+        if (
+            LLM_ENRICH_N1A
+            and record.entity_type == "ETF"
+            and record.form_type in ETF_PROSPECTUS_FORMS
+        ):
+            _enrich_etf_from_filing(entity_id, record)
 
     logger.info("Ingestion summary: %s", summary)
     return summary
@@ -151,4 +160,46 @@ def _ensure_etf_exists(record: FilingRecord, summary: dict) -> int | None:
         "edgar_url": record.edgar_url,
     })
     logger.info("New ETF entity: %s (CIK=%s)", record.entity_name, record.cik)
+
     return new_id
+
+
+def _enrich_etf_from_filing(etf_id: int, record: FilingRecord) -> None:
+    """Run LLM enrichment for an ETF using the given prospectus-bearing filing.
+
+    Called for every N-1A / N-1A/A / 485BPOS / 497 / 497K filing — both on the
+    initial registration and on subsequent amendments. Merge semantics: only
+    fields the LLM actually populates from the new filing overwrite existing
+    values, so a field omitted from a sticker (e.g. 497 doesn't repeat the
+    portfolio manager) doesn't wipe a value extracted from an earlier N-1A.
+
+    Imported lazily so the openai dependency is only loaded when actually used,
+    and so an enrichment failure can never block ingestion of the filing event.
+    """
+    try:
+        from pipeline.enricher import enrich_n1a
+    except Exception as e:
+        logger.warning("Enricher import failed; skipping enrichment: %s", e)
+        return
+
+    try:
+        fields = enrich_n1a(record.cik, record.accession_number)
+    except Exception as e:
+        logger.warning("Enrichment crashed for ETF id=%d (%s): %s", etf_id, record.entity_name, e)
+        return
+
+    if not fields:
+        logger.info("Enrichment yielded no fields for ETF id=%d (%s)", etf_id, record.entity_name)
+        return
+
+    # Drop None values so a sparse later filing can't clobber a populated field.
+    # Always keep enriched_at — it records that we ran the LLM against this filing.
+    enriched_at = fields.get("enriched_at")
+    updates = {k: v for k, v in fields.items() if v is not None and k != "enriched_at"}
+    if enriched_at:
+        updates["enriched_at"] = enriched_at
+
+    if not updates:
+        return
+
+    update_etf(etf_id, updates)

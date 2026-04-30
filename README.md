@@ -11,8 +11,9 @@ A Python pipeline that monitors SEC EDGAR daily index filings for **stock IPOs**
 1. **Daily Batch Ingestion** — Downloads the SEC EDGAR daily index file (published ~10 PM ET), parses it for IPO/ETF-related form types, and inserts new entities into the database.
 2. **Lifecycle Tracking** — Each entity progresses through statuses: `FILED → AMENDED → PRICED → EFFECTIVE → LAUNCHED`. Every daily run advances the status as new filings appear.
 3. **Event Log** — Every individual filing (S-1, S-1/A, 424B, EFFECT, N-1A, 485BPOS, etc.) is recorded in a `filing_events` table, providing a full audit trail.
-4. **Notifications** — When an entity reaches `LAUNCHED` status, a row is inserted into the `notifications` table and the entity is moved to the `active_securities` table.
-5. **Exploration** — A Jupyter Notebook connects to the SQLite DB for interactive querying, filtering, and visual exploration of the pipeline and active tables.
+4. **ETF Prospectus LLM Enrichment** — Every time an ETF gets a prospectus-bearing filing (`N-1A`, `N-1A/A`, `485APOS`, `485BPOS`, `497`, `497K`), the prospectus is fetched from EDGAR and sent to an OpenAI-compatible LLM endpoint to extract structured metadata (investment theme, expense ratio, portfolio manager, benchmark index, asset class, fund type, principal strategy). Re-enrichment on amendments and annual updates uses merge semantics: only fields the new filing populates overwrite existing values — a sparse sticker filing never wipes a value extracted from an earlier prospectus. Missing fields are left NULL — never guessed.
+5. **Notifications** — When an entity reaches `LAUNCHED` status, a row is inserted into the `notifications` table and the entity is moved to the `active_securities` table.
+6. **Exploration** — A Jupyter Notebook connects to the SQLite DB for interactive querying, filtering, and visual exploration of the pipeline and active tables.
 
 ### Lifecycle Model
 
@@ -55,12 +56,16 @@ IPO_ETF/
 │
 ├── pipeline/                  # Core pipeline logic
 │   ├── __init__.py            # Package init
-│   ├── ingester.py            # Ingests parsed filings into the database
+│   ├── ingester.py            # Ingests parsed filings; re-runs LLM enrichment on every ETF prospectus filing
 │   ├── lifecycle.py           # Advances entity status based on new filings
-│   └── notifier.py            # Handles launch detection → notifications + active table
+│   ├── notifier.py            # Handles launch detection → notifications + active table
+│   └── enricher.py            # Prospectus → LLM extraction of fund metadata (N-1A / 485BPOS / 497 / …)
 │
 ├── notebooks/                 # Jupyter notebooks for data exploration
 │   └── explorer.ipynb         # Interactive notebook to query & visualize DB tables
+│
+├── tests/                     # Test scripts
+│   └── test_n1a_enrichment.py # Live smoke test: pulls a recent N-1A and runs enrichment end-to-end
 │
 ├── docs/                      # Additional documentation (if needed)
 │
@@ -105,22 +110,30 @@ IPO_ETF/
 
 ### `etf_launches` — ETF pipeline tracker
 
-| Column            | Type     | Description                                      |
-|-------------------|----------|--------------------------------------------------|
-| `id`              | INTEGER  | Primary key (auto-increment)                      |
-| `fund_name`       | TEXT     | ETF/fund name (from filing)                       |
-| `ticker`          | TEXT     | Ticker symbol (NULL until assigned)                |
-| `cik`             | TEXT     | SEC Central Index Key                              |
-| `status`          | TEXT     | Current lifecycle status (FILED→LAUNCHED)          |
-| `form_type`       | TEXT     | Initial filing form type (e.g., N-1A)             |
-| `filing_date`     | TEXT     | Date of first filing                               |
-| `effective_date`  | TEXT     | Date SEC declared effective (NULL until known)     |
-| `launch_date`     | TEXT     | Actual ETF trading start date (NULL until launched)|
-| `exchange`        | TEXT     | Target exchange                                    |
-| `issuer`          | TEXT     | Fund sponsor/issuer company                        |
-| `edgar_url`       | TEXT     | URL to EDGAR filing page                           |
-| `created_at`      | TEXT     | Row creation timestamp                             |
-| `updated_at`      | TEXT     | Last update timestamp                              |
+| Column                | Type     | Description                                              |
+|-----------------------|----------|----------------------------------------------------------|
+| `id`                  | INTEGER  | Primary key (auto-increment)                             |
+| `fund_name`           | TEXT     | ETF/fund name (from filing)                              |
+| `ticker`              | TEXT     | Ticker symbol (NULL until assigned)                      |
+| `cik`                 | TEXT     | SEC Central Index Key                                    |
+| `status`              | TEXT     | Current lifecycle status (FILED→LAUNCHED)                |
+| `form_type`           | TEXT     | Initial filing form type (e.g., N-1A)                    |
+| `filing_date`         | TEXT     | Date of first filing                                     |
+| `effective_date`      | TEXT     | Date SEC declared effective (NULL until known)           |
+| `launch_date`         | TEXT     | Actual ETF trading start date (NULL until launched)      |
+| `exchange`            | TEXT     | Target exchange                                          |
+| `issuer`              | TEXT     | Fund sponsor/issuer company                              |
+| `edgar_url`           | TEXT     | URL to EDGAR filing page                                 |
+| `investment_theme`    | TEXT     | LLM-extracted investment theme/strategy focus            |
+| `expense_ratio`       | REAL     | LLM-extracted total expense ratio (decimal, e.g. 0.0075) |
+| `portfolio_manager`   | TEXT     | LLM-extracted portfolio manager name(s)                  |
+| `benchmark_index`     | TEXT     | LLM-extracted benchmark index name                       |
+| `asset_class`         | TEXT     | LLM-extracted asset class (Equity, Fixed Income, etc.)   |
+| `fund_type`           | TEXT     | LLM-extracted fund type (Active, Passive, Index, ...)    |
+| `principal_strategy`  | TEXT     | LLM-extracted principal strategy summary                 |
+| `enriched_at`         | TEXT     | Timestamp of last LLM enrichment (NULL if never run)     |
+| `created_at`          | TEXT     | Row creation timestamp                                   |
+| `updated_at`          | TEXT     | Last update timestamp                                    |
 
 ### `filing_events` — Audit log of every filing
 
@@ -211,10 +224,23 @@ pip install -r requirements.txt
 ```bash
 # Copy the template
 cp .env.example .env
+```
 
-# Edit .env with your info (required by SEC EDGAR):
-# SEC_USER_AGENT_NAME=Your Name
-# SEC_USER_AGENT_EMAIL=you@email.com
+Required SEC EDGAR identification:
+
+```
+SEC_USER_AGENT_NAME=Your Name
+SEC_USER_AGENT_EMAIL=you@email.com
+```
+
+LLM enrichment (any OpenAI-compatible endpoint — OpenAI, Azure OpenAI, internal proxy, vLLM, etc.):
+
+```
+LLM_API_BASE_URL=                # leave blank for OpenAI's default; otherwise the /v1 root of your endpoint
+LLM_API_KEY=sk-...               # API key for the endpoint above
+LLM_MODEL=gpt-4o-mini            # any chat-completions model the endpoint exposes
+LLM_ENRICH_N1A=true              # set to false to disable inline enrichment
+LLM_MAX_DOC_CHARS=80000          # how much prospectus text to send to the LLM
 ```
 
 ### 3. Initialize the database

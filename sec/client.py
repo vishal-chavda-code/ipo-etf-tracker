@@ -113,3 +113,17 @@ class EdgarClient:
         )
         resp = self.get(url)
         return resp.text
+
+    def fetch_filing_index_json(self, cik: str, accession_number: str) -> dict:
+        """Fetch the filing's index.json — a manifest of every document in the submission."""
+        acc_no_dashes = accession_number.replace("-", "")
+        url = f"{EDGAR_BASE_URL}/Archives/edgar/data/{cik}/{acc_no_dashes}/index.json"
+        resp = self.get(url)
+        return resp.json()
+
+    def fetch_filing_document(self, cik: str, accession_number: str, filename: str) -> str:
+        """Fetch a single document inside a filing by filename (as listed in index.json)."""
+        acc_no_dashes = accession_number.replace("-", "")
+        url = f"{EDGAR_BASE_URL}/Archives/edgar/data/{cik}/{acc_no_dashes}/{filename}"
+        resp = self.get(url)
+        return resp.text

@@ -22,14 +22,38 @@ def get_connection() -> sqlite3.Connection:
 
 
 def init_db() -> None:
-    """Create all tables if they don't exist."""
+    """Create all tables if they don't exist, then run lightweight column migrations."""
     conn = get_connection()
     try:
         conn.executescript(SCHEMA_SQL)
+        _migrate_etf_enrichment_columns(conn)
         conn.commit()
         logger.info("Database initialized at %s", DB_PATH)
     finally:
         conn.close()
+
+
+# Columns added to etf_launches after the original schema shipped.
+# SQLite's CREATE TABLE IF NOT EXISTS won't add columns to a pre-existing table,
+# so we ALTER TABLE for any that are missing.
+_ETF_ENRICHMENT_COLUMNS = [
+    ("investment_theme",   "TEXT"),
+    ("expense_ratio",      "REAL"),
+    ("portfolio_manager",  "TEXT"),
+    ("benchmark_index",    "TEXT"),
+    ("asset_class",        "TEXT"),
+    ("fund_type",          "TEXT"),
+    ("principal_strategy", "TEXT"),
+    ("enriched_at",        "TEXT"),
+]
+
+
+def _migrate_etf_enrichment_columns(conn: sqlite3.Connection) -> None:
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(etf_launches)")}
+    for col, ddl_type in _ETF_ENRICHMENT_COLUMNS:
+        if col not in existing:
+            conn.execute(f"ALTER TABLE etf_launches ADD COLUMN {col} {ddl_type}")
+            logger.info("Added column etf_launches.%s", col)
 
 
 # ---------------------------------------------------------------------------

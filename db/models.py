@@ -22,20 +22,29 @@ CREATE TABLE IF NOT EXISTS stock_ipos (
 
 -- ETF launch pipeline tracker
 CREATE TABLE IF NOT EXISTS etf_launches (
-    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-    fund_name       TEXT    NOT NULL,
-    ticker          TEXT,
-    cik             TEXT,
-    status          TEXT    NOT NULL DEFAULT 'FILED',
-    form_type       TEXT,
-    filing_date     TEXT,
-    effective_date  TEXT,
-    launch_date     TEXT,
-    exchange        TEXT,
-    issuer          TEXT,
-    edgar_url       TEXT,
-    created_at      TEXT    NOT NULL DEFAULT (datetime('now')),
-    updated_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+    id                  INTEGER PRIMARY KEY AUTOINCREMENT,
+    fund_name           TEXT    NOT NULL,
+    ticker              TEXT,
+    cik                 TEXT,
+    status              TEXT    NOT NULL DEFAULT 'FILED',
+    form_type           TEXT,
+    filing_date         TEXT,
+    effective_date      TEXT,
+    launch_date         TEXT,
+    exchange            TEXT,
+    issuer              TEXT,
+    edgar_url           TEXT,
+    -- LLM-enriched fields (populated from the N-1A prospectus text). All nullable.
+    investment_theme    TEXT,
+    expense_ratio       REAL,
+    portfolio_manager   TEXT,
+    benchmark_index     TEXT,
+    asset_class         TEXT,
+    fund_type           TEXT,
+    principal_strategy  TEXT,
+    enriched_at         TEXT,
+    created_at          TEXT    NOT NULL DEFAULT (datetime('now')),
+    updated_at          TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 
 -- Audit log: every individual filing event

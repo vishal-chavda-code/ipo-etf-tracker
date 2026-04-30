@@ -26,6 +26,28 @@ SEC_REQUEST_DELAY = 0.12  # seconds between requests (~8 req/s, safe margin)
 # --- Database ---
 DB_PATH = PROJECT_ROOT / os.getenv("DB_PATH", "db/ipo_etf_tracker.db")
 
+# --- LLM (OpenAI-compatible API) ---
+# Any OpenAI-compatible endpoint: OpenAI, Azure OpenAI, internal proxy, vLLM, etc.
+# Empty LLM_API_BASE_URL means the openai SDK will use its default (api.openai.com).
+LLM_API_BASE_URL = os.getenv("LLM_API_BASE_URL", "").strip() or None
+LLM_API_KEY = os.getenv("LLM_API_KEY", "").strip()
+LLM_MODEL = os.getenv("LLM_MODEL", "gpt-4o-mini").strip()
+LLM_ENRICH_N1A = os.getenv("LLM_ENRICH_N1A", "true").strip().lower() in ("1", "true", "yes", "y")
+LLM_MAX_DOC_CHARS = int(os.getenv("LLM_MAX_DOC_CHARS", "80000"))
+
+# Fields the LLM should extract from an N-1A filing.
+# Adding a new field here AND in the etf_launches schema (db/models.py) is all
+# that's needed to expand enrichment coverage — the prompt is generated from this list.
+N1A_ENRICHMENT_FIELDS = {
+    "investment_theme":   "Short phrase describing the fund's investment theme or strategy focus (e.g. 'AI infrastructure equities', 'short-duration US treasuries').",
+    "expense_ratio":      "Total annual fund operating expense ratio as a decimal number (e.g. 0.0075 for 0.75%). Use the net/total expense ratio, not gross, if both are listed.",
+    "portfolio_manager":  "Full name(s) of the portfolio manager(s). If multiple, separate with '; '.",
+    "benchmark_index":    "Name of the benchmark index the fund tracks or compares against, if any.",
+    "asset_class":        "Primary asset class: 'Equity', 'Fixed Income', 'Commodity', 'Multi-Asset', 'Currency', 'Alternative', or similar.",
+    "fund_type":          "One of: 'Active', 'Passive', 'Index', 'Smart Beta', 'Actively Managed ETF'. Use the most specific that fits.",
+    "principal_strategy": "1-3 sentence summary of the fund's principal investment strategy.",
+}
+
 # --- Filing form types ---
 # Stock IPO forms
 IPO_FORM_TYPES = {
@@ -54,6 +76,13 @@ ETF_FORM_TYPES = {
 # Initial registration forms — only these seed NEW entity rows
 IPO_INITIAL_FORMS = {"S-1", "F-1"}
 ETF_INITIAL_FORMS = {"N-1A"}
+
+# ETF filings that carry the prospectus narrative the LLM enricher parses.
+# Every one of these should trigger a fresh extraction so fields like
+# expense_ratio / portfolio_manager / principal_strategy track the latest
+# prospectus, not just the initial N-1A. 8-A12B is an Exchange Act listing
+# form with no prospectus content, so it's deliberately excluded.
+ETF_PROSPECTUS_FORMS = {"N-1A", "N-1A/A", "485APOS", "485BPOS", "497", "497K"}
 
 # All monitored forms
 ALL_FORM_TYPES = IPO_FORM_TYPES | ETF_FORM_TYPES
